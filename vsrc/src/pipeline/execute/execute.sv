@@ -14,11 +14,11 @@ module execute
     import common::*;
     import pipes::*;
 (
-    input  decode_data_t dataD,         // 来自 decode 阶段的数�?
-    output execute_data_t dataE         // 执行阶段输出的数�?
+    input  decode_data_t dataD,         // 来自 decode 阶段的数�?
+    output execute_data_t dataE         // 执行阶段输出的数�?
 );
 
-    // ALU实例�?
+    // ALU实例�?
     alu alu_inst (
         .operand1(dataD.srca),
         .operand2(dataD.srcb),
@@ -27,7 +27,7 @@ module execute
         .zero_flag(dataE.zero_flag)
     );
 
-    // 分支条件计算：仅在控制信号中标记�? branch 的指令下才进行比�?
+    // 分支条件计算：仅在控制信号中标记�? branch 的指令下才进行比�?
     // 根据不同的分支类型进行比较，生成 branch_taken 信号
     logic branch_taken;
     logic mem;
@@ -48,9 +48,9 @@ module execute
         end
     end
 
-    // 计算跳转目标地址�?
-    // 如果是跳转（jump）指令，则目标地�?�? dataD.jump_target（由 decode 计算）提�?
-    // 如果是分支指令且分支条件满足，则目标地址同样�? dataD.jump_target提供；否则，使用 ALU 结果（顺序执行）
+    // 计算跳转目标地址�?
+    // 如果是跳转（jump）指令，则目标地�?�? dataD.jump_target（由 decode 计算）提�?
+    // 如果是分支指令且分支条件满足，则目标地址同样�? dataD.jump_target提供；否则，使用 ALU 结果（顺序执行）
     
     assign dataE.jump_target = (dataD.ctl.jump || (dataD.ctl.branch && branch_taken)) 
                  ? dataD.jump_target 
@@ -75,7 +75,7 @@ module execute
     
 
     always_comb begin
-        // 默认�?
+        // 默认�?
         mem = 1'b0;
         memaddr = 64'b0;
 
@@ -93,14 +93,15 @@ module execute
     end
 
     //----------------------------------------------------------------------  
-    // CSR 写使�? / 地址 / 写数�?
+    // CSR 写使�? / 地址 / 写数�?
     //----------------------------------------------------------------------  
-    // decode 阶段已经�? ctl.csr, csr_we, csr_addr 打包好了
+    // decode 阶段已经�? ctl.csr, csr_we, csr_addr 打包好了
     assign dataE.csr       = dataD.ctl.csr;
     assign dataE.csr_we    = dataD.ctl.csr && dataD.ctl.csr_we;
     assign dataE.csr_addr  = dataD.ctl.csr_addr;
-    assign dataE.csr_wdata = dataD.srca;  // CSRRW/CSRRS �? rs1，CSRRWI/CSRRSI �? zimm，都打在 srca
-    assign dataE.csr_rdata = dataD.csr_rdata; // 读到的旧�?
+    // assign dataE.csr_wdata = dataD.srca;
+    assign dataE.csr_wdata = dataD.csr_wdata;
+    assign dataE.csr_rdata = dataD.csr_rdata;
 
 endmodule
 

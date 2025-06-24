@@ -14,6 +14,7 @@
 `include "src/pipeline_reg/id_ex_reg.sv"
 `include "src/pipeline_reg/if_id_reg.sv"
 `include "src/pipeline_reg/mem_wb_reg.sv"
+`include "src/pipeline_reg/wb_reg.sv"
 `include "src/pipeline/csrfile/csrfile.sv"
 `include "src/pipeline/mmu/mmu.sv"
 `else
@@ -41,19 +42,34 @@ module core
 	logic 			stall_mmu;
 	logic 			instr_valid; 		
 	logic 			flush;
-	u1 				stall_mret;
-	u1 				stall_ecall;
+	// u1 				stall_mret;
+	// u1 				stall_ecall;
+	u1 				stall_exception;
 
 	// regs, csr regs, privilege mode
 	logic[XLEN-1:0] mstatus, mtvec, mip, mie, mscratch;
 	logic[XLEN-1:0] mcause, mtval, mepc, mcycle, mhartid, satp;
 	logic [63:0] 	difftest_regs[31:0];
 	word_t 			csr_rdata;  		// csrfile read data
+	u1 				csr_write_finish;
 	u1        		csr_we;
 	u12 			csr_addr_r, csr_addr_w;
 	word_t 			csr_pc_nxt;
 	u2 				mode;
 
+	u1 				instr_misaligned;
+	u1 				store_misaligned;
+	u1 				load_misaligned;
+	u1 				timer_interrupt;
+	u1 				csr_jump_en;
+	u64 			misaligned_pc;
+	u64 			ls_mis_pc;
+	u64 			cur_pc;
+	
+	// interrupt
+
+	assign mip  = {52'b0, exint,3'b0, trint, 3'b0, swint, 3'b0}; 
+	
 	u32 			raw_instr;
 	dbus_req_t 		tmp_dreq;	// tmp
 	dbus_resp_t 	tmp_dresp;
@@ -66,32 +82,39 @@ module core
 	execute_data_t 		dataE, dataE_nxt;
 	memory_data_t 		dataM, dataM_nxt;
 	writeback_data_t 	dataW;
+	u64 				jump_target;
 
 	assign instr_valid 			= tmp_iresp.data_ok;
-	assign flush 				= stall_bj || dataW.ctl.csr || dataW.jump_flag;
+	assign flush 				= stall_bj || dataW.ctl.csr || dataW.jump_flag || csr_jump_en;
 	assign stallpc 				= ireq.valid && ~tmp_iresp.data_ok || stall_mem || stall_csr || stall_mmu;
 	assign stall_pipeline 		= stall_mem || stall_bj;
-	assign stall_csr 			= dataD.ctl.csr || dataE.ctl.csr || dataW.ctl.csr || dataM.ctl.csr;
-	assign stall_mret 			= dataW.ctl.op == MRET;
-	assign stall_ecall 			= dataW.ctl.op == ECALL;
-
+	assign stall_csr 			= dataD.ctl.csr || dataE.ctl.csr || dataW.ctl.csr || dataM.ctl.csr || store_misaligned || load_misaligned;
+	// assign stall_csr 			=  dataW.ctl.csr || store_misaligned || load_misaligned;
+	// assign stall_mret 			= dataW.ctl.op == MRET;
+	// assign stall_ecall 			= dataW.ctl.op == ECALL;
+	assign stall_exception 		= dataW.ctl.op == ECALL || dataW.ctl.op == MRET || csr_jump_en|| instr_misaligned; //|| store_misaligned || load_misaligned;
 	assign raw_instr 			= instr_valid ? tmp_iresp.data : '0;  
 
 	// when jump_flag is true, stall_bj = 1，until pc == jump_target
 	always_ff @(posedge clk or posedge reset) begin
-		if (reset)
+		if (reset) begin 
 			stall_bj <= 1'b0;
-		else if (dataW.jump_flag || stall_mret || stall_ecall)
+			jump_target <= 64'b0;
+		end
+		else if (dataW.jump_flag || stall_exception) begin
 			stall_bj <= 1'b1;
-		else if (tmp_iresp.data_ok)
+			jump_target <= dataW.jump_flag ? dataW.jump_target : csr_pc_nxt;
+		end
+		else if (tmp_iresp.data_ok) // (pc == jump_target  || pc == mtvec) 
 			stall_bj <= 1'b0;
 		else
 			stall_bj <= stall_bj;
 	end
 	
+	// diaplay debug info
 	/* always_ff @(posedge clk) begin
-		if (pc >= 64'h7ffff0000 ) begin
-			$display("op: %decode_op_t", dataD.ctl.op);
+		if (trint) begin
+			$display("pc: %h", pc);
 		end
 	end */
 
@@ -129,9 +152,11 @@ module core
 	
 	fetch fetch (
 		.dataF(dataF_nxt),
+		.instr_misaligned(instr_misaligned),
 		.raw_instr(raw_instr),
 		.pc(pc),
-		.instr_valid(instr_valid)
+		.instr_valid(instr_valid),
+		.misaligned_pc(misaligned_pc)
 	);
 	
 	pcselect pcselect (
@@ -139,9 +164,10 @@ module core
 		.pcplus4(pc + 4),	
 		.jump_target(dataW.jump_target),
 		.jump_flag(dataW.jump_flag),
-		.csr_jump_en(dataW.ctl.op == MRET || dataW.ctl.op == ECALL),
+		.csr_jump_en(stall_exception),
+		// .csr_jump_en(dataW.ctl.op == MRET || dataW.ctl.op == ECALL),
 		.csr_pc_nxt(csr_pc_nxt),
-		.stall(stall_pipeline),
+		.stall(stall_pipeline && ~csr_jump_en),
 		.pc_selected(pc_nxt)	
 	);
 
@@ -173,19 +199,79 @@ module core
 		.difftest_regs(difftest_regs)
 	);
 	
+	u64 latest_pc;
+	always_comb begin
+		/* if (dataW.commit_valid)
+			latest_pc = dataW.commit_pc; */
+		if (dataM.instr_valid)
+			latest_pc = dataM.pc;
+		else if (dataE.instr_valid)
+			latest_pc = dataE.pc;
+		else if (dataD.instr_valid)
+			latest_pc = dataD.pc;
+		else if (dataF.instr_valid)
+			latest_pc = dataF.pc;
+		else
+			latest_pc = pc;
+	end
+
+	// 定义 PC 历史缓冲区（FIFO，容量为5）
+	u64 pc_history [0:4];  // 索引0为最新PC，索引4为最旧PC
+	u64 prev_pc;
+
+	always_ff @(posedge clk or posedge reset) begin
+		if (reset) begin
+			prev_pc <= '0;  // 复位时清零
+			foreach (pc_history[i]) pc_history[i] <= '0;
+		end else begin
+			// 仅在 cur_pc 变化时更新历史缓冲区
+			if (pc != prev_pc) begin
+				// 保存当前 cur_pc 到 prev_pc
+				prev_pc <= pc;
+
+				// 更新 PC 历史缓冲区
+				pc_history[4] <= pc_history[3];
+				pc_history[3] <= pc_history[2];
+				pc_history[2] <= pc_history[1];
+				pc_history[1] <= pc_history[0];
+				pc_history[0] <= cur_pc;  // 最新 PC 插入头部
+			end
+		end
+	end
+	// cur_pc, for selcet true mepc
+	always_comb begin
+		if (instr_misaligned)
+			cur_pc = misaligned_pc;
+		else if (store_misaligned || load_misaligned)
+			cur_pc = ls_mis_pc;
+		else if(timer_interrupt)
+			cur_pc = latest_pc;
+		else
+			cur_pc = dataD.pc;
+	end
+
 
 	csrfile csrfile_u (
-	.clk      (clk),
-	.reset    (reset),
-	.csr_addr_r(csr_addr_r),   // decode 阶段 ?
-	.csr_rdata (csr_rdata),
-	.csr_we   (dataD.ctl.csr_we),   
-	.csr_addr_w(dataD.ctl.csr_addr),
-	.csr_wdata (dataD.csr_wdata),   
-	.op(dataD.ctl.op),
-	.cur_pc(dataD.pc),
-	.nxt_pc(csr_pc_nxt), // 异常返回地址
-	.mode(mode),
+	.clk      			(clk),
+	.reset    			(reset),
+	.csr_addr_r			(csr_addr_r),   // decode read csr addr
+	.csr_rdata 			(csr_rdata),
+	.csr_we   			(dataW_nxt.ctl.csr_we),   // dataD -> dataW.
+	.csr_addr_w			(dataW_nxt.ctl.csr_addr),
+	.csr_wdata 			(dataW_nxt.csr_wdata),  
+	.op					(dataW_nxt.ctl.op),
+	.csr_write_finish   (csr_write_finish), 
+	.instr_misaligned	(instr_misaligned), // instruction misaligned
+	.store_misaligned	(store_misaligned), // store misaligned
+	.load_misaligned	(load_misaligned),  // load misaligned
+	.timer_interrupt	(timer_interrupt), // timer interrupt
+	// .int_pend			(int_pend),       // interrupt pending
+	.cur_pc				(cur_pc), 
+	.csr_jump_en		(csr_jump_en),       
+	//.cur_pc				(instr_misaligned ? misaligned_pc : dataD.pc),
+	.nxt_pc				(csr_pc_nxt), // exception return address
+	.mode				(mode),
+	
 
 	.mstatus  (mstatus),
 	.mtvec    (mtvec),
@@ -230,9 +316,12 @@ module core
 		.dataM(dataM_nxt),
 		.dreq(tmp_dreq),
 		.dresp(tmp_dresp),
+		.store_misaligned(store_misaligned),
+		.load_misaligned(load_misaligned),
 		// .dreq(dreq),
 		// .dresp(dresp),
-		.stall_mem(stall_mem)
+		.stall_mem(stall_mem),
+		.ls_mis_pc(ls_mis_pc)
 	);
 
 	mem_wb_reg mw(
@@ -244,13 +333,24 @@ module core
 		.dataM_new(dataM_nxt)
 	);
 
+	writeback_data_t dataW_nxt;
+
 	writeback writeback_inst (
 		.clk(clk),
 		.reset(reset),
 		.dataM(dataM),
-		.dataW(dataW)
+		.dataW(dataW_nxt)
 	);
 
+	wb_reg wb(
+		.clk(clk),
+		.reset(reset),
+		.enable(~stall_pipeline),
+		.csr_write_finish(csr_write_finish),
+		.flush(flush),
+		.dataW(dataW),
+		.dataW_new(dataW_nxt)
+	);
 	
 `ifdef VERILATOR
 	DifftestInstrCommit DifftestInstrCommit(

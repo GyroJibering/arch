@@ -17,7 +17,7 @@ module pcselect
     input  u64          jump_target,  // 跳转目标地址
     input  logic        jump_flag,  // 跳转标志（为1表示跳转）
     input  logic        stall,      // 阻塞信号（为1时保持当前PC不变）
-    input               csr_jump_en,      // MRET使能信号
+    input  u1           csr_jump_en,      // MRET使能信号
     input  u64          csr_pc_nxt,      // CSR PC选择信号
     output u64          pc_selected
 );
@@ -35,6 +35,14 @@ always_ff @(posedge clk) begin
 end
 
 assign pc_selected = pc_temp;
+
+/* always_ff @(posedge clk) begin
+		if (csr_jump_en) begin
+			$display("pc: %h", pcplus4-4);
+            // $display("csr pc: %h", csr_pc_nxt);
+		end
+	end */
+
 endmodule
 
 `endif

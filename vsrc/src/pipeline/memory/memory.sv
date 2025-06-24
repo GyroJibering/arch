@@ -17,7 +17,11 @@ module memory
     output memory_data_t  dataM,       // 传递到 MEM/WB 阶段的数据
     output dbus_req_t     dreq,        // 数据总线请求（包含地址、大小、strobe、写数据）
     input  dbus_resp_t    dresp,         // 数据总线响应（返回数据及状态）
-    output logic          stall_mem
+    output u1             store_misaligned, // Store 指令是否存在未对齐问题
+    output u1             load_misaligned,  // Load 指令是否存在未对齐问题
+    output logic          stall_mem,
+
+    output u64            ls_mis_pc     // load and store misaligned pc
     
 );
 
@@ -31,7 +35,8 @@ module memory
     assign is_load  = (opcode == OP_LOAD);
     assign is_store = (opcode == OP_SD);
     // 数据总线请求有效：Load 或 Store 时均需要访存操作
-    assign dreq.valid = is_load || is_store;
+    assign dreq.valid = (is_load || is_store);// && !store_misaligned;;
+
     // 使用 ALU 计算出的地址作为访问地址
     assign dreq.addr  = dataE.alu_result;
 
@@ -76,6 +81,47 @@ module memory
         end
     end
 
+    always_comb begin
+        if (is_store) begin
+            case (dataE.ctl.op)  // 使用执行阶段的操作码，而非 dreq.size
+                SH: store_misaligned = (dataE.alu_result[2:0] + 2 > 8);
+                SW: store_misaligned = (dataE.alu_result[2:0] + 4 > 8);
+                SD: store_misaligned = (dataE.alu_result[2:0] != 0);
+                default: store_misaligned = 1'b0;
+            endcase
+        end else begin
+            store_misaligned = 1'b0;
+        end
+    end
+    
+    always_comb begin
+        load_misaligned = 1'b0;  // 默认无错误
+        if (is_load) begin  // 仅在 Load 指令时检测
+            case (dataE.ctl.op)
+                LH, LHU:   load_misaligned = (dataE.alu_result[2:0] + 2 > 8);
+                LW, LWU:   load_misaligned = (dataE.alu_result[2:0] + 4 > 8);
+                LD:        load_misaligned = (dataE.alu_result[2:0] != 0);
+                default:   load_misaligned = 1'b0;
+            endcase
+        end
+    end
+
+
+    always_comb begin
+        if (is_load && load_misaligned) begin
+            ls_mis_pc = dataE.pc;
+        end else if (is_store && store_misaligned) begin
+            ls_mis_pc = dataE.pc;
+        end else begin
+            ls_mis_pc = 64'b0;
+        end
+    end
+
+    /* always_ff @(posedge clk) begin
+		if (load_misaligned) begin
+			$display("pc: %h", dataE.pc);
+		end
+	end */
     // 对于 store 指令，不写回寄存器；Load 指令及其他计算指令，写回信号保持原值
     assign dataM.reg_write_en = is_store ? 1'b0 : dataE.reg_write_en;
     

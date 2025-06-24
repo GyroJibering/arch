@@ -171,6 +171,13 @@ typedef enum logic [2:0] {
     MMU_DIRECT, PAGE_1, PAGE_2, PAGE_3, MMU_NOP, MMU_GAP
 } mmu_state;
 
+typedef enum logic [2:0] {
+    TIMER_INTERRUPT,
+    EXTERNAL_INTERRUPT,
+    SOFTWARE_INTERRUPT,
+    INT_NOP
+} interrupt_state_t;
+
 typedef struct packed {
     decode_op_t op;        // 操作类型（上面的枚举）
     alufunc_t   alufunc;   // ALU操作码（比如加法、减法、移位等）
